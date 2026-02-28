@@ -1,6 +1,8 @@
 import React, { useMemo, useEffect } from 'react';
 import { CheckCircle, AlertCircle, Info } from 'lucide-react';
 import { MarketplaceConfig, GlobalInputs, CalculationResult } from '../types';
+import { getMLShippingCost } from '../utils/mlShipping';
+import { getShopeeFees } from '../utils/shopeeShipping';
 
 interface MarketplaceCardProps {
   config: MarketplaceConfig;
@@ -65,54 +67,64 @@ export const MarketplaceCard: React.FC<MarketplaceCardProps> = ({ config, global
     if (config.type === 'mercadolivre') {
       const rawPrice = globalValues.sellingPrice;
       const price = isNaN(rawPrice) ? 0 : rawPrice;
+      const weightGrams = isNaN(globalValues.productWeight) ? 0 : globalValues.productWeight;
+      const weight = weightGrams / 1000; // converter gramas para kg para lookup na tabela
       
       // Lógica "Full Super" (Supermercado)
       if (config.isFullSuper) {
           let superFee = 0;
-          
-          // Faixas de custo fixo por unidade para Full Super
-          // Só aplica se preço > 0 para evitar aplicar taxas em valor zerado,
-          // mas se o usuário estiver editando, assume-se comportamento dinâmico.
           if (price > 0) {
-            if (price < 30) {
-                superFee = 1.00; // Até R$ 29,99
-            } else if (price < 50) {
-                superFee = 2.00; // R$ 30,00 a R$ 49,99
-            } else if (price < 100) {
-                superFee = 4.00; // R$ 50,00 a R$ 99,99
-            } else if (price < 199) {
-                superFee = 6.00; // R$ 100,00 a R$ 198,99
-            } else {
-                // Acima de R$ 199. Na dúvida, zeramos ou mantemos regra.
-                superFee = 0; 
-            }
+            if (price < 30) superFee = 1.00;
+            else if (price < 50) superFee = 2.00;
+            else if (price < 100) superFee = 4.00;
+            else if (price < 199) superFee = 6.00;
+            else superFee = 0;
           }
-
-          // Atualiza apenas se o valor for diferente
           if (config.fixedFee !== superFee) {
               onUpdateConfig(config.id, { fixedFee: superFee });
           }
       } 
       // Lógica Padrão (Sem Full Super)
       else {
-          // Se o preço for menor que 79, a taxa fixa padrão é 6.50.
-          // Isso vale inclusive para preço 0 (configuração inicial/reset).
           if (price < 79) {
               if (config.fixedFee !== 6.50) onUpdateConfig(config.id, { fixedFee: 6.50 });
-          } 
-          // Se for maior ou igual a 79, taxa fixa é 0.
-          else {
+          } else {
               if (config.fixedFee !== 0) onUpdateConfig(config.id, { fixedFee: 0 });
           }
       }
 
-      // Update shipping cost logic (Updated to 22.50 for mandatory free shipping > 79)
-      // Only updates if current shipping is 0 to allow manual edits
-      if (price >= 79 && config.shippingCost === 0) {
-        onUpdateConfig(config.id, { shippingCost: 22.50 });
+      // Auto-calcular frete baseado no peso e preço
+      if (weight > 0) {
+        const mlShipping = getMLShippingCost(weight, price);
+        if (config.shippingCost !== mlShipping) {
+          onUpdateConfig(config.id, { shippingCost: mlShipping });
+        }
+      } else {
+        // Sem peso: lógica antiga (22.50 para >= 79, senão 0)
+        if (price >= 79 && config.shippingCost === 0) {
+          onUpdateConfig(config.id, { shippingCost: 22.50 });
+        }
       }
     }
-  }, [globalValues.sellingPrice, config.type, config.shippingCost, config.id, config.isFullSuper, config.fixedFee, onUpdateConfig]);
+  }, [globalValues.sellingPrice, globalValues.productWeight, config.type, config.shippingCost, config.id, config.isFullSuper, config.fixedFee, onUpdateConfig]);
+
+  // --- Lógica de Auto-Cálculo Shopee ---
+  useEffect(() => {
+    if (config.type !== 'shopee') return;
+    const price = isNaN(globalValues.sellingPrice) ? 0 : globalValues.sellingPrice;
+    const sellerType = config.shopeeSellerType || 'cnpj';
+    const mode = (config.extraOptionValue as string) === 'standard' ? 'standard' : 'free_shipping';
+    
+    const fees = getShopeeFees(price, sellerType, mode);
+    
+    const updates: Partial<MarketplaceConfig> = {};
+    if (config.commissionRate !== fees.commissionRate) updates.commissionRate = fees.commissionRate;
+    if (config.fixedFee !== fees.fixedFee) updates.fixedFee = fees.fixedFee;
+    
+    if (Object.keys(updates).length > 0) {
+      onUpdateConfig(config.id, updates);
+    }
+  }, [globalValues.sellingPrice, config.type, config.shopeeSellerType, config.extraOptionValue, config.id, onUpdateConfig]);
 
   // Helper safe number
   const safe = (val: number) => isNaN(val) ? 0 : val;
@@ -135,14 +147,16 @@ export const MarketplaceCard: React.FC<MarketplaceCardProps> = ({ config, global
 
     const { commissionRate, fixedFee, shippingCost, anticipationFee } = config;
 
+    const totalRevenue = sellingPrice * quantity;
     const totalBaseCost = (productionCost + packagingCost) * quantity;
-    const taxValue = (sellingPrice * taxRate) / 100;
-    const totalMarketplaceFees = (sellingPrice * commissionRate / 100) + fixedFee + shippingCost + (sellingPrice * anticipationFee / 100);
+    const taxValue = (totalRevenue * taxRate) / 100;
+    const totalMarketplaceFees = (totalRevenue * commissionRate / 100) + fixedFee + shippingCost + (totalRevenue * anticipationFee / 100);
+    const totalMarketingCost = marketingCost * quantity;
     
     // Profit = Revenue - (Base Costs + Tax + Fees + Marketing)
-    const realProfit = sellingPrice - (totalBaseCost + taxValue + totalMarketplaceFees + marketingCost);
+    const realProfit = totalRevenue - (totalBaseCost + taxValue + totalMarketplaceFees + totalMarketingCost);
     
-    const profitMargin = sellingPrice > 0 ? (realProfit / sellingPrice) * 100 : 0;
+    const profitMargin = totalRevenue > 0 ? (realProfit / totalRevenue) * 100 : 0;
     const roi = totalBaseCost > 0 ? (realProfit / totalBaseCost) * 100 : 0;
     
     // Logic: If profit >= 0, it's considered "success" color-wise in this new requirement
@@ -174,14 +188,15 @@ export const MarketplaceCard: React.FC<MarketplaceCardProps> = ({ config, global
     const marketing = (enableRoas && roasValue > 0) ? (sellingPrice / roasValue) : 0;
     const marketingPercent = (enableRoas && roasValue > 0) ? (1 / roasValue) * 100 : 0;
 
+    const totalRevenue = sellingPrice * quantity;
     return {
-        commission: (sellingPrice * config.commissionRate) / 100,
+        commission: (totalRevenue * config.commissionRate) / 100,
         fixedFee: config.fixedFee,
         cost: (productionCost + packagingCost) * quantity,
-        tax: (sellingPrice * taxRate) / 100,
+        tax: (totalRevenue * taxRate) / 100,
         shipping: config.shippingCost,
-        anticipation: (sellingPrice * config.anticipationFee) / 100,
-        marketing: marketing,
+        anticipation: (totalRevenue * config.anticipationFee) / 100,
+        marketing: marketing * quantity,
         marketingPercent: marketingPercent
     };
   }, [globalValues, config]);
@@ -223,7 +238,7 @@ export const MarketplaceCard: React.FC<MarketplaceCardProps> = ({ config, global
         updates.commissionRate = mode === 'standard' ? 14 : 20; 
     } else if (config.type === 'amazon') {
         // Amazon fees updates
-        updates.fixedFee = mode === 'none' ? 0 : (mode === 'dba' ? 5.50 : 8.50);
+        updates.fixedFee = mode === 'dba' ? 5.50 : 8.50;
     } else if (config.type === 'tiktok') {
         // Standard: 8% | Affiliate: 13%
         updates.commissionRate = mode === 'standard' ? 8 : 13;
@@ -265,9 +280,63 @@ export const MarketplaceCard: React.FC<MarketplaceCardProps> = ({ config, global
              {config.type === 'tiktok' && ['standard', 'affiliate'].map(mode => (
                <button key={mode} onClick={() => handleModeSwitch(mode)} className={`flex-1 py-1.5 text-xs font-bold uppercase rounded-md transition-all ${config.extraOptionValue === mode ? 'bg-white dark:bg-slate-700 shadow-sm text-slate-900 dark:text-white' : 'text-slate-400 hover:text-slate-600'}`}>{mode === 'affiliate' ? 'Afiliado' : 'Padrão'}</button>
              ))}
-             {config.type === 'amazon' && ['none', 'dba', 'fba'].map(mode => (
-               <button key={mode} onClick={() => handleModeSwitch(mode)} className={`flex-1 py-1.5 text-xs font-bold uppercase rounded-md transition-all ${config.extraOptionValue === mode ? 'bg-white dark:bg-slate-700 shadow-sm text-slate-900 dark:text-white' : 'text-slate-400 hover:text-slate-600'}`}>{mode === 'none' ? 'Próprio' : mode.toUpperCase()}</button>
-             ))}
+             {config.type === 'amazon' && ['dba', 'fba'].map(mode => (
+                <button key={mode} onClick={() => handleModeSwitch(mode)} className={`flex-1 py-1.5 text-xs font-bold uppercase rounded-md transition-all ${config.extraOptionValue === mode ? 'bg-white dark:bg-slate-700 shadow-sm text-slate-900 dark:text-white' : 'text-slate-400 hover:text-slate-600'}`}>{mode.toUpperCase()}</button>
+              ))}
+          </div>
+        )}
+
+        {/* Shopee: CPF/CNPJ Toggle + Pix Subsidy */}
+        {config.type === 'shopee' && (
+          <div className="space-y-3">
+            {/* CPF / CNPJ Selector */}
+            <div className="flex bg-slate-100 dark:bg-slate-800 rounded-lg p-1">
+              {['cnpj', 'cpf'].map(type => (
+                <button
+                  key={type}
+                  onClick={() => onUpdateConfig(config.id, { shopeeSellerType: type as 'cnpj' | 'cpf' })}
+                  className={`flex-1 py-1.5 text-xs font-bold uppercase rounded-md transition-all ${
+                    config.shopeeSellerType === type
+                      ? 'bg-white dark:bg-slate-700 shadow-sm text-slate-900 dark:text-white'
+                      : 'text-slate-400 hover:text-slate-600'
+                  }`}
+                >
+                  {type.toUpperCase()}
+                </button>
+              ))}
+            </div>
+
+            {/* CPF Warning */}
+            {config.shopeeSellerType === 'cpf' && (
+              <div className="flex items-start gap-2 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-lg p-2.5">
+                <Info className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                <span className="text-[11px] text-amber-700 dark:text-amber-300">
+                  Vendedores CPF com +450 pedidos/90 dias pagam <strong>R$ 3,00 extra</strong> por item.
+                </span>
+              </div>
+            )}
+
+            {/* Pix Subsidy Toggle */}
+            <div className="flex items-center justify-between bg-slate-50 dark:bg-slate-800/50 p-3 rounded-lg border border-slate-100 dark:border-slate-800">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-slate-700 dark:text-slate-300">Subsídio Pix</span>
+                <div className="group relative">
+                  <Info className="w-4 h-4 text-blue-500 cursor-help" />
+                  <div className="absolute left-1/2 bottom-full mb-2 -translate-x-1/2 w-56 p-3 bg-slate-900 text-white text-xs rounded-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-10 shadow-xl pointer-events-none text-left">
+                    <p>Desconto aplicado ao comprador via Pix. Não afeta o lucro do vendedor.</p>
+                    <div className="absolute left-1/2 top-full -translate-x-1/2 border-8 border-transparent border-t-slate-900"></div>
+                  </div>
+                </div>
+              </div>
+              <button
+                onClick={() => onUpdateConfig(config.id, { shopeePixSubsidy: !config.shopeePixSubsidy })}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:focus:ring-offset-slate-900 ${
+                  config.shopeePixSubsidy ? 'bg-blue-600' : 'bg-slate-300 dark:bg-slate-600'
+                }`}
+              >
+                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${config.shopeePixSubsidy ? 'translate-x-6' : 'translate-x-1'}`} />
+              </button>
+            </div>
           </div>
         )}
 
@@ -378,6 +447,22 @@ export const MarketplaceCard: React.FC<MarketplaceCardProps> = ({ config, global
                     <span className="text-red-600 dark:text-red-400 font-semibold">- R$ {breakdown.anticipation.toFixed(2)}</span>
                   </div>
                   )}
+                  {/* Shopee Pix Subsidy Info (não afeta lucro) */}
+                  {config.type === 'shopee' && config.shopeePixSubsidy && (() => {
+                    const price = safe(globalValues.sellingPrice);
+                    const fees = getShopeeFees(price, config.shopeeSellerType || 'cnpj', 'standard');
+                    if (fees.pixSubsidyRate <= 0) return null;
+                    return (
+                      <div className="flex justify-between items-center text-sm bg-blue-50 dark:bg-blue-950/30 rounded-md px-2 py-1.5 mt-1">
+                        <span className="text-blue-600 dark:text-blue-400 font-medium flex items-center gap-1">
+                          💳 Subsídio Pix ({fees.pixSubsidyRate}%)
+                        </span>
+                        <span className="text-blue-600 dark:text-blue-400 font-semibold">
+                          Comprador paga - R$ {fees.pixSubsidyValue.toFixed(2)}
+                        </span>
+                      </div>
+                    );
+                  })()}
              </div>
 
              <div className="h-px bg-slate-200 dark:bg-slate-800 my-4"></div>

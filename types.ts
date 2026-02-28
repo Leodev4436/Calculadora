@@ -9,6 +9,8 @@ export interface GlobalInputs {
   // Marketing / ROAS
   enableRoas: boolean;
   roasValue: number;
+  // Peso do produto
+  productWeight: number; // gramas
 }
 
 export type MarketplaceType = 'mercadolivre' | 'shopee' | 'amazon' | 'shein' | 'magalu' | 'tiktok';
@@ -27,6 +29,9 @@ export interface MarketplaceConfig {
   extraOption?: string; // e.g., "Classic/Premium" or "DBA/FBA"
   extraOptionValue?: string | boolean; 
   isFullSuper?: boolean; // Toggle for Mercado Livre Full Supermarket rules
+  // Shopee specific
+  shopeeSellerType?: 'cnpj' | 'cpf';
+  shopeePixSubsidy?: boolean;
 }
 
 export interface CalculationResult {
